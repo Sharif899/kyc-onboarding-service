@@ -1,6 +1,6 @@
 # kyc-onboarding-service
 
-**Identity verification and KYC onboarding — Spring Boot 3, Java 21, JPA/H2. A customer submits an identity document, the service validates it, checks for duplicates, runs verification, and records every decision in an audit trail.**
+**Identity verification and KYC onboarding — Spring Boot 3, Java 21, JPA, H2 for zero-setup runs and PostgreSQL for real ones. A customer submits an identity document, the service validates it, checks for duplicates, runs verification, and records every decision in an audit trail.**
 
 > This is the work I do as a Senior Software Engineer at Seamfix: backend services for identity verification, KYC and digital onboarding. This service is that workflow, in code — small enough to read in an afternoon, complete enough to run end to end.
 
@@ -27,6 +27,28 @@ cd kyc-onboarding-service
 ```
 
 The service runs on `http://localhost:8080` with an in-memory H2 database — no external database needed. All data is synthetic test data; there is no real personal data anywhere in this repo.
+
+## Running with PostgreSQL / Supabase
+
+The default profile is H2 so the project runs with zero setup. For a real database, activate the `postgres` profile and point it at PostgreSQL with environment variables — the connection string is never written into the repo, a config file, or a commit.
+
+```bash
+export SPRING_DATASOURCE_URL='jdbc:postgresql://<your-host>:5432/<your-database>?sslmode=require'
+export SPRING_DATASOURCE_USERNAME='<your-database-user>'
+export SPRING_DATASOURCE_PASSWORD='<your-database-password>'
+./mvnw spring-boot:run --spring.profiles.active=postgres
+```
+
+For Supabase, the host, database, user and password come from the Supabase dashboard (Project Settings → Database → Connection string, in **JDBC** format — it starts `jdbc:postgresql://`). Supabase requires SSL, so keep `?sslmode=require` on the URL; the free tier also limits connections, which is why the profile's Hikari pool is capped at 10.
+
+What the `postgres` profile does:
+
+- Uses the PostgreSQL driver and `PostgreSQLDialect` (the entities were checked against Postgres: UUID primary keys, enums stored as strings, `LocalDateTime`/`LocalDate` columns, no H2-specific SQL anywhere).
+- Creates the tables on first run with `spring.jpa.hibernate.ddl-auto=update` — `onboarding_applications` and `audit_log_entries`, with the unique constraints on document number and idempotency key. Nothing else to run. For a real production deployment, switch to `ddl-auto=validate` with Flyway migrations instead of `update`.
+- Fails fast at startup if `SPRING_DATASOURCE_URL` is not set, instead of silently falling back to the in-memory database.
+- Data now survives restarts, and document numbers stay masked — the masking applies to API responses and log lines whichever database is behind the service.
+
+Never commit a real connection string: keep it in environment variables (or your deployment platform's secret store), and never paste one into an issue, a PR, or chat.
 
 ## API
 
@@ -164,11 +186,13 @@ The state machine is the design's centre: `transitionTo()` is the only way an ap
 ./mvnw test
 ```
 
-49 tests: document-format validation, masking, the state machine, service rules (duplicate, idempotency, age, verification outcomes, re-verification flow, invalid transitions, audit trail), and MockMvc integration tests for every endpoint (happy path, duplicate, idempotency, invalid document, invalid state transition, missing application).
+54 tests: document-format validation, masking, the state machine, service rules (duplicate, idempotency, age, verification outcomes, re-verification flow, invalid transitions, audit trail), MockMvc integration tests for every endpoint (happy path, duplicate, idempotency, invalid document, invalid state transition, missing application), and configuration tests proving the `postgres` profile is fully environment-driven and the default profile still falls back to H2.
+
+There is deliberately no integration test against a live PostgreSQL instance — CI has no database, and one would need a real connection string. To verify the Postgres path, run the service with `--spring.profiles.active=postgres` against Supabase as above and exercise the endpoints in the API section.
 
 ## Limitations — stated honestly
 
-- **In-memory H2 database.** Data disappears when the service stops. For production, point `spring.datasource.url` at PostgreSQL and use `ddl-auto=validate` with Flyway migrations.
+- **In-memory H2 database by default.** Data disappears when the service stops. For a real database, run with the `postgres` profile as above — PostgreSQL via environment variables, tables created on first run. For production, use `ddl-auto=validate` with Flyway migrations.
 - **Mock verification provider.** The even/odd-digit rule is a stand-in so the flow can be exercised without a live identity registry. It is not a real identity check — a real provider implements `VerificationProvider`.
 - **Synthetic data only.** Every name, number and email in the tests and examples is invented. No real personal data is in this repository.
 - **No authentication yet.** In production this API sits behind the platform's auth (the same way the onboarding services it models do); adding Spring Security is the natural next step, deliberately left out so the workflow itself stays readable.
